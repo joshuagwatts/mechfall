@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
-<title>KAIJU PROTOCOL — slice 01</title>
+<title>KAIJU PROTOCOL — slice 02</title>
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><text y='13' font-size='13'>🤖</text></svg>">
 <style>
   html,body{margin:0;padding:0;height:100%;overflow:hidden;background:#05070c;
@@ -51,6 +51,16 @@
     text-shadow:0 0 26px rgba(255,60,10,.8)}
   #start p{font-size:13px;letter-spacing:2px;color:#9fd8ff;max-width:520px;line-height:2}
   #start .go{font-size:16px;letter-spacing:4px;color:#ffe97d;animation:blink 1.4s infinite}
+  #start .slots{display:flex;gap:18px;flex-wrap:wrap;justify-content:center}
+  #start .slot{border:1px solid rgba(125,249,255,.35);border-radius:6px;padding:12px 16px;
+    min-width:210px;background:rgba(8,14,24,.6);cursor:default}
+  #start .slotname{font-size:12px;letter-spacing:4px;color:#7df9ff;margin-bottom:8px}
+  #start .filebtn{display:inline-block;font-size:12px;letter-spacing:2px;color:#0a0f16;cursor:pointer;
+    background:#7df9ff;border-radius:4px;padding:8px 14px;margin-bottom:8px}
+  #start .filebtn:hover{background:#aefcff}
+  #start .slotstatus{font-size:11px;letter-spacing:1px;color:#9fd8ff;line-height:1.6;min-height:34px}
+  #start .slotclear{font-size:10px;letter-spacing:2px;color:#6f93ad;cursor:pointer;margin-top:4px;display:none}
+  #start .slotclear:hover{color:#ff8a5a}
 </style>
 </head>
 <body>
@@ -59,7 +69,7 @@
 <div class="hud" id="mode">ON FOOT</div>
 <div class="hud" id="bars">
   <div class="barlabel">KAIJU</div><div class="bar"><div id="kaijuFill"></div></div>
-  <div class="barlabel" id="mechLabel" style="display:none">MECH HULL</div>
+  <div class="barlabel" id="mechLabel" style="display:none">JAEGER HULL</div>
   <div class="bar" id="mechBar" style="display:none"><div id="mechFill"></div></div>
   <div class="barlabel" id="fuelLabel">JETPACK</div><div class="bar" id="fuelBar"><div id="fuelFill"></div></div>
 </div>
@@ -71,14 +81,29 @@
   <div class="strut sT"></div><div class="ret"></div></div>
 <div id="start">
   <h1>KAIJU PROTOCOL</h1>
-  <p>Night city. One mech. One kaiju.<br>Jetpack up the mech, board it, and bring the kaiju down.</p>
+  <p>Night city. One jaeger. One kaiju.<br>Jetpack up the jaeger, board it, and bring the kaiju down.</p>
+  <div class="slots">
+    <div class="slot">
+      <div class="slotname">PILOT</div>
+      <label class="filebtn">IMPORT VRM / GLB<input type="file" id="filePilot" accept=".vrm,.glb,.gltf" hidden></label>
+      <div class="slotstatus" id="statusPilot">procedural biped</div>
+      <div class="slotclear" id="clearPilot">✕ restore procedural</div>
+    </div>
+    <div class="slot">
+      <div class="slotname">JAEGER</div>
+      <label class="filebtn">IMPORT VRM / GLB<input type="file" id="fileJaeger" accept=".vrm,.glb,.gltf" hidden></label>
+      <div class="slotstatus" id="statusJaeger">procedural biped ×10</div>
+      <div class="slotclear" id="clearJaeger">✕ restore procedural</div>
+    </div>
+  </div>
   <div class="go">— TAP TO DEPLOY —</div>
 </div>
 
 <script type="importmap">
 {"imports":{
   "three":"./js/vendor/three.module.js",
-  "three/addons/":"./js/addons/"
+  "three/addons/":"./js/addons/",
+  "@pixiv/three-vrm":"./js/vendor/three-vrm.module.min.js"
 }}
 </script>
 <script type="module">
@@ -89,6 +114,8 @@ import { ShaderPass } from 'three/addons/postprocessing/ShaderPass.js';
 import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
 import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
+import { buildProceduralRig, BONE_NAMES, VRM_BONE_MAP } from './js/rig.js';
+import { loadVRMFile, attachAvatarToChar, detachAvatarFromChar } from './js/vrm.js';
 
 
 window.__bootErrors = [];
@@ -480,62 +507,231 @@ function buildingNear(x, z, radius){
 
 
 
-/* ============ MECH (~17m) ============ */
-function buildMech(){
-  const g = new THREE.Group();
-  const armor = new THREE.MeshStandardMaterial({ color:0x39404a, metalness:0.85, roughness:0.42 });
-  const dark  = new THREE.MeshStandardMaterial({ color:0x14171c, metalness:0.70, roughness:0.55 });
-  const glow  = new THREE.MeshStandardMaterial({ color:0x061014, emissive:0x35e0ff, emissiveIntensity:2.4 });
-  const hatch = new THREE.MeshStandardMaterial({ color:0x140a04, emissive:0xff7a1e, emissiveIntensity:2.2 });
-  const M = (geo, mat)=>{ const m = new THREE.Mesh(geo, mat); m.castShadow = true; return m; };
+/* ============ BIPEDS (pilot + jaeger) ============ */
+/* Real humanoid rigs, not boxes. Procedural fallback is SMASHVR's rig
+   (~1.7 units, feet at y=0); a .vrm/.glb/.gltf import hides it and drops
+   the avatar in, normalized to slot height. Both characters face +Z. */
+const UP = new THREE.Vector3(0, 1, 0);
 
-  function leg(sx){
-    const hip = new THREE.Group(); hip.position.set(sx*1.9, 8.4, 0); g.add(hip);
-    const thigh = M(new THREE.BoxGeometry(2.2,4.6,2.6), armor); thigh.position.y = -2.3; hip.add(thigh);
-    const knee = new THREE.Group(); knee.position.y = -4.6; hip.add(knee);
-    const shin = M(new THREE.BoxGeometry(1.7,4.0,2.0), dark); shin.position.y = -2.0; knee.add(shin);
-    const foot = M(new THREE.BoxGeometry(2.6,1.2,4.4), armor); foot.position.set(0,-4.3,0.7); knee.add(foot);
-    const strip = M(new THREE.BoxGeometry(0.35,3.4,0.35), glow); strip.position.set(sx*1.15,-2.3,0); hip.add(strip);
-    return { hip, knee, foot };
-  }
-  const legL = leg(-1), legR = leg(1);
-
-  const torso = new THREE.Group(); torso.position.y = 11.6; g.add(torso);
-  const chest = M(new THREE.BoxGeometry(6.4,5.4,4.6), armor); torso.add(chest);
-  const plate = M(new THREE.BoxGeometry(5.0,2.2,0.5), dark); plate.position.set(0,-0.6,2.3); torso.add(plate);
-  const hatchMesh = M(new THREE.CylinderGeometry(1.15,1.15,0.5,24), hatch);
-  hatchMesh.rotation.x = Math.PI/2; hatchMesh.position.set(0, 0.9, 2.35); torso.add(hatchMesh);
-  const stripC = M(new THREE.BoxGeometry(5.6,0.35,0.35), glow); stripC.position.set(0,2.2,2.15); torso.add(stripC);
-  /* shoulder trims so the torso reads at night */
-  for(const sx of [-1,1]){
-    const sh2 = M(new THREE.BoxGeometry(0.35,2.8,0.35), glow); sh2.position.set(sx*3.05, 0.2, 1.9); torso.add(sh2);
-    const sh3 = M(new THREE.BoxGeometry(0.35,2.8,0.35), glow); sh3.position.set(sx*3.05, 0.2, -1.9); torso.add(sh3);
-  }
-
-  const neck = new THREE.Group(); neck.position.y = 3.1; torso.add(neck);
-  const head = M(new THREE.BoxGeometry(2.9,2.0,2.9), dark); head.position.y = 0.9; neck.add(head);
-  const visor = M(new THREE.BoxGeometry(2.4,0.6,0.4), glow); visor.position.set(0,1.0,1.45); neck.add(visor);
-
-  function arm(sx){
-    const sh = new THREE.Group(); sh.position.set(sx*4.1, 1.7, 0); torso.add(sh);
-    const upper = M(new THREE.BoxGeometry(1.9,3.8,2.1), armor); upper.position.y = -1.9; sh.add(upper);
-    const el = new THREE.Group(); el.position.y = -3.8; sh.add(el);
-    const fore = M(new THREE.BoxGeometry(1.6,3.4,1.8), dark); fore.position.y = -1.7; el.add(fore);
-    const fist = M(new THREE.BoxGeometry(2.1,2.1,2.3), armor); fist.position.y = -4.0; el.add(fist);
-    return { sh, el, fist };
-  }
-  const armL = arm(-1), armR = arm(1);
-  /* jet vents on back */
-  for(const sx of [-1,1]){
-    const vent = M(new THREE.CylinderGeometry(0.8,1.0,1.6,12), dark);
-    vent.position.set(sx*1.8, 0.6, -2.6); torso.add(vent);
-  }
-  return { group:g, legL, legR, armL, armR, torso, neck, hatchMesh, hatchMat:hatch,
-           vel:new THREE.Vector3(), yaw:0, punchT:0, stompT:0, stepPhase:0 };
+function makeBiped({ scale = 1, bulky = false, suit = 0x2a3340, accent = 0x35e0ff }){
+  const root = new THREE.Group();
+  const rig = buildProceduralRig({ primary: accent, secondary: suit }, bulky ? 'ronin' : 'volt');
+  rig.group.rotation.y = -Math.PI / 2;   /* rig faces +X -> root forward +Z */
+  root.add(rig.group);
+  root.scale.setScalar(scale);
+  scene.add(root);
+  return {
+    root, group: root, rig, vrm: null, _vrmRest: null, floater: false, scale,
+    vel: new THREE.Vector3(), vy: 0, yaw: 0,
+    fuel: 100, grounded: true,
+    stridePhase: 0, prevStepSign: 1,
+    punchT: 0, stompT: 0, state: 'idle', _animT: 0,
+  };
 }
-const mech = buildMech();
-mech.group.position.set(0, 0, 14);
-scene.add(mech.group);
+
+/* ---- pose dicts: euler [x,y,z] per bone (SMASHVR-verified numbers) ---- */
+function poseIdle(t){
+  const br = Math.sin(t * 2.2) * 0.035;
+  return {
+    spine: [0, 0, -0.12 + br], chest: [0, 0.14, -0.08 + br],
+    head: [0, 0, 0.08 + Math.sin(t * 2.2 + 1) * 0.025],
+    upperArmR: [0, 0, 1.05 + Math.sin(t * 2.2) * 0.05],
+    upperArmL: [0, 0, -0.95 - Math.sin(t * 2.2) * 0.05],
+  };
+}
+function poseRun(ph){
+  const s1 = Math.sin(ph), s2 = Math.sin(ph + Math.PI);
+  return {
+    upperLegR: [0, 0, 0.1 + s1 * 0.8], upperLegL: [0, 0, 0.1 + s2 * 0.8],
+    lowerLegR: [0, 0, -(0.25 + 0.7 * Math.max(0, -s1))],
+    lowerLegL: [0, 0, -(0.25 + 0.7 * Math.max(0, -s2))],
+    upperArmR: [0, 0, 0.9 + s2 * 0.55], upperArmL: [0, 0, -0.9 - s1 * 0.55],
+    lowerArmR: [0, 0, 1.1], lowerArmL: [0, 0, -1.1],
+    spine: [0, 0, -0.28], chest: [0, 0.1, -0.15], head: [0, 0, 0.15],
+  };
+}
+function poseJump(){
+  return {
+    upperLegR: [0, 0, 0.85], lowerLegR: [0, 0, -1.8],
+    upperLegL: [0, 0, 0.7], lowerLegL: [0, 0, -1.6],
+    upperArmR: [0, 0, 1.5], upperArmL: [0, 0, -1.5],
+    spine: [0, 0, -0.2],
+  };
+}
+function poseFall(){
+  return {
+    upperArmR: [0, 0, 2.3], lowerArmR: [0, 0, 0.4],
+    upperArmL: [0, 0, -2.3], lowerArmL: [0, 0, -0.4],
+    upperLegR: [0, 0, 0.35], lowerLegR: [0, 0, -0.5],
+    upperLegL: [0, 0, -0.25], lowerLegL: [0, 0, 0.4],
+    head: [0, 0, -0.15],
+  };
+}
+function poseHover(t){
+  const br = Math.sin(t * 2.6) * 0.06;
+  return {
+    spine: [0, 0, -0.06 + br], chest: [0, 0.1, -0.04 + br],
+    head: [0, 0, 0.05 + Math.sin(t * 2.6 + 1) * 0.04],
+    upperArmR: [0, 0, 0.75 + Math.sin(t * 2.6) * 0.08],
+    upperArmL: [0, 0, -0.75 - Math.sin(t * 2.6) * 0.08],
+    lowerArmR: [0, 0, 0.5], lowerArmL: [0, 0, -0.5],
+  };
+}
+function posePunch(k){ /* k: 0→1 over the swing */
+  let arm, fore, twist;
+  if(k < 0.35){ const u = k / 0.35; arm = 1.05 + u * 0.95; fore = 0.5 + u * 1.1; twist = -u * 0.32; }
+  else if(k < 0.62){ const u = (k - 0.35) / 0.27; arm = 2.0 - u * 1.85; fore = 1.6 - u * 1.45; twist = -0.32 + u * 0.6; }
+  else { const u = (k - 0.62) / 0.38; arm = 0.15 + u * 0.9; fore = 0.15 + u * 0.35; twist = 0.28 - u * 0.28; }
+  return {
+    upperArmR: [0, 0, arm], lowerArmR: [0, 0, fore],
+    upperArmL: [0, 0, -0.6], lowerArmL: [0, 0, -1.3],
+    spine: [0, 0, -0.32], chest: [0, twist, -0.15], head: [0, 0, 0.1],
+    upperLegR: [0, 0, 0.35], upperLegL: [0, 0, -0.3],
+    lowerLegR: [0, 0, -0.5], lowerLegL: [0, 0, 0.4],
+  };
+}
+
+const _e = new THREE.Euler(), _q = new THREE.Quaternion();
+function applyPose(c, dict){
+  if(c.vrm && c.vrm.vrm && c.vrm.vrm.humanoid){
+    /* VRM path: rest×delta per bone (SMASHVR v0.6.1 fix — absolute sets
+       twist the head on non-identity rest poses) */
+    const humanoid = c.vrm.vrm.humanoid;
+    humanoid.resetNormalizedPose();
+    if(!c._vrmRest){
+      c._vrmRest = {};
+      for(const b of BONE_NAMES){
+        const nd = humanoid.getNormalizedBoneNode(VRM_BONE_MAP[b]);
+        c._vrmRest[b] = nd ? nd.quaternion.clone() : null;
+      }
+    }
+    for(const b of BONE_NAMES){
+      const e = dict[b]; if(!e) continue;
+      const node = humanoid.getNormalizedBoneNode(VRM_BONE_MAP[b]);
+      const rest = c._vrmRest[b];
+      if(!node || !rest) continue;
+      _q.setFromEuler(_e.set(e[0], e[1], e[2]));
+      node.quaternion.copy(rest).multiply(_q);
+    }
+  } else if(c.rig){
+    for(const b of BONE_NAMES){
+      const e = dict[b]; if(!e || !c.rig.bones[b]) continue;
+      c.rig.bones[b].rotation.set(e[0], e[1], e[2]);
+    }
+  }
+}
+
+function poseBiped(c, dt){
+  c._animT += dt;
+  let dict;
+  if(c.floater) dict = poseHover(c._animT);
+  else if(c.punchT > 0) dict = posePunch(1 - c.punchT / 0.5);
+  else if(!c.grounded) dict = c.vy > 1 ? poseJump() : poseFall();
+  else if(c.state === 'run') dict = poseRun(c.stridePhase);
+  else dict = poseIdle(c._animT);
+  applyPose(c, dict);
+  if(c.vrm && c.vrm.vrm && c.vrm.vrm.update) c.vrm.vrm.update(dt);
+}
+
+/* ---- the character controller (acceptance criterion #1: feel) ----
+   Camera-relative WASD, exponential approach to target velocity (snappy,
+   no ice-skating), shortest-arc yaw. Same code drives pilot and jaeger —
+   the jaeger just gets heavier numbers. */
+function tickBiped(c, dt, o){
+  const ix = (keys.KeyD || keys.ArrowRight ? 1 : 0) - (keys.KeyA || keys.ArrowLeft ? 1 : 0);
+  const iz = (keys.KeyW || keys.ArrowUp ? 1 : 0) - (keys.KeyS || keys.ArrowDown ? 1 : 0);
+  const fwd = new THREE.Vector3();
+  camera.getWorldDirection(fwd); fwd.y = 0;
+  if(fwd.lengthSq() < 1e-6) fwd.set(0, 0, 1); else fwd.normalize();
+  const right = new THREE.Vector3().crossVectors(fwd, UP).normalize();
+  const wish = new THREE.Vector3().addScaledVector(fwd, iz).addScaledVector(right, ix);
+  if(wish.lengthSq() > 1) wish.normalize();
+
+  const k = 1 - Math.exp(-dt * o.accelRate);
+  c.vel.x += (wish.x * o.topSpeed - c.vel.x) * k;
+  c.vel.z += (wish.z * o.topSpeed - c.vel.z) * k;
+  const rp = c.root.position;
+  rp.x = THREE.MathUtils.clamp(rp.x + c.vel.x * dt, -150, 150);
+  rp.z = THREE.MathUtils.clamp(rp.z + c.vel.z * dt, -150, 150);
+  const speed = Math.hypot(c.vel.x, c.vel.z);
+
+  if(speed > 0.6){
+    const ty = Math.atan2(c.vel.x, c.vel.z);
+    let dy = ty - c.yaw;
+    while(dy > Math.PI) dy -= Math.PI * 2;
+    while(dy < -Math.PI) dy += Math.PI * 2;
+    c.yaw += dy * Math.min(1, dt * o.turnRate);
+  }
+  c.root.rotation.y = c.yaw;
+
+  if(c.floater){
+    rp.y = 0.45 + Math.sin(c._animT * 2.6) * 0.1;
+    c.vy = 0; c.grounded = false;
+  } else if(o.jetpack){
+    const thrust = !!(keys.Space && c.fuel > 0);
+    if(thrust){
+      c.vy += (10 - c.vy) * (1 - Math.exp(-dt * 7));
+      c.fuel = Math.max(0, c.fuel - 38 * dt);
+      if(Math.random() < 0.7) spawnSparks(rp.x, rp.y + 0.2, rp.z, 2, 6, 0x66d9ff);
+    } else c.vy -= 26 * dt;
+    rp.y += c.vy * dt;
+    if(rp.y <= 0){ rp.y = 0; c.vy = 0; c.grounded = true; c.fuel = Math.min(100, c.fuel + 30 * dt); }
+    else c.grounded = false;
+  } else { rp.y = 0; c.vy = 0; c.grounded = true; }
+
+  if(c.grounded && speed > 0.6 && !c.floater){
+    c.state = 'run';
+    c.stridePhase += dt * speed * o.strideFreq;
+  } else if(c.grounded) c.state = 'idle';
+
+  /* giant footfalls: shake + dust + crumble */
+  const s = Math.sign(Math.sin(c.stridePhase)) || 1;
+  if(o.giant && c.grounded && speed > 3 && s !== c.prevStepSign){
+    G.shake = Math.min(1.4, G.shake + 0.35);
+    thud(55, 0.35, 0.22);
+    const side = Math.random() < 0.5 ? -1 : 1;
+    spawnDust(rp.x + side * 2, 0.8, rp.z + 2, 7, 1.1);
+    const b = buildingNear(rp.x, rp.z, 6.5);
+    if(b) crumble(b, c.vel.x / Math.max(1, speed), c.vel.z / Math.max(1, speed));
+  }
+  c.prevStepSign = s;
+}
+
+/* ---- cast ---- */
+const pilot = makeBiped({ scale: 1, bulky: false, suit: 0x232b38, accent: 0x35e0ff });
+pilot.root.position.set(0, 0, -14);
+const jaeger = makeBiped({ scale: 10, bulky: true, suit: 0x39404a, accent: 0xff7a1e });
+jaeger.root.position.set(0, 0, 14);
+/* legacy aliases: kaiju AI + HUD code below still says mech./player. */
+const mech = jaeger, player = pilot;
+
+/* ---- glowing boarding hatch, pinned to the jaeger's chest ---- */
+const hatchMat = new THREE.MeshStandardMaterial({ color: 0x140a04, emissive: 0xff7a1e, emissiveIntensity: 2.2 });
+const hatchAnchor = new THREE.Object3D();
+{
+  const hm = new THREE.Mesh(new THREE.CylinderGeometry(0.115, 0.115, 0.05, 20), hatchMat);
+  hm.rotation.x = Math.PI / 2;
+  hatchAnchor.add(hm);
+}
+jaeger.root.add(hatchAnchor);
+const _hv = new THREE.Vector3();
+function chestWorld(c, out){
+  out = out || new THREE.Vector3();
+  let n = null;
+  if(c.vrm && c.vrm.vrm && c.vrm.vrm.humanoid) n = c.vrm.vrm.humanoid.getNormalizedBoneNode('chest');
+  else if(c.rig && c.rig.bones.chest) n = c.rig.bones.chest;
+  if(n) return n.getWorldPosition(out);
+  return c.root.localToWorld(out.set(0, 1.35, 0));
+}
+function updateHatch(){
+  const w = chestWorld(jaeger, _hv);
+  jaeger.root.worldToLocal(w);
+  hatchAnchor.position.set(w.x, w.y, w.z + 0.30);
+}
+function hatchWorld(){
+  return hatchAnchor.getWorldPosition(new THREE.Vector3());
+}
+updateHatch();
 
 /* ============ KAIJU (~52m procedural biped) ============ */
 function buildKaiju(){
@@ -647,32 +843,6 @@ const kaiju = buildKaiju();
 kaiju.group.position.set(150, 0, -150);
 scene.add(kaiju.group);
 
-/* ============ PLAYER (on foot) ============ */
-function buildPlayer(){
-  const g = new THREE.Group();
-  const suit = new THREE.MeshStandardMaterial({ color:0x1c2129, roughness:0.6, metalness:0.4 });
-  const glow = new THREE.MeshStandardMaterial({ color:0x000000, emissive:0x35e0ff, emissiveIntensity:2.5 });
-  const body = new THREE.Mesh(new THREE.CapsuleGeometry(0.42, 0.85, 4, 10), suit);
-  body.position.y = 1.05; body.castShadow = true; g.add(body);
-  const helm = new THREE.Mesh(new THREE.SphereGeometry(0.30, 14, 10), suit);
-  helm.position.y = 1.95; helm.castShadow = true; g.add(helm);
-  const visor = new THREE.Mesh(new THREE.BoxGeometry(0.34,0.14,0.1), glow);
-  visor.position.set(0, 1.97, 0.26); g.add(visor);
-  const pack = new THREE.Mesh(new THREE.BoxGeometry(0.5,0.7,0.3), suit);
-  pack.position.set(0, 1.25, -0.38); g.add(pack);
-  const flame = new THREE.Mesh(new THREE.ConeGeometry(0.28, 1.4, 10),
-    new THREE.MeshBasicMaterial({ color:0x66d9ff, transparent:true, opacity:0.9,
-      blending:THREE.AdditiveBlending, depthWrite:false }));
-  flame.rotation.x = Math.PI; flame.position.set(0, 0.45, -0.38); flame.visible = false; g.add(flame);
-  const legM = new THREE.CapsuleGeometry(0.14, 0.55, 3, 8);
-  const legL = new THREE.Mesh(legM, suit); legL.position.set(-0.18, 0.45, 0); g.add(legL);
-  const legR = new THREE.Mesh(legM, suit); legR.position.set(0.18, 0.45, 0); g.add(legR);
-  return { group:g, flame, legL, legR, vel:new THREE.Vector3(), vy:0, fuel:100,
-    grounded:true, yaw:0, walkT:0 };
-}
-const player = buildPlayer();
-player.group.position.set(0, 0, -14);
-scene.add(player.group);
 
 /* ============ input ============ */
 const keys = {};
@@ -685,12 +855,13 @@ addEventListener('keydown', e=>{
   if(e.code === 'KeyJ') tryPunch();
 });
 addEventListener('keyup', e=>{ keys[e.code] = false; });
-addEventListener('mousedown', e=>{ if(e.target.id !== 'start') tryPunch(); });
+addEventListener('mousedown', e=>{ if(started && e.target.tagName === 'CANVAS') tryPunch(); });
 addEventListener('resize', ()=>{
   camera.aspect = innerWidth/innerHeight; camera.updateProjectionMatrix();
   renderer.setSize(innerWidth, innerHeight);
   composer.setSize(innerWidth, innerHeight);
 });
+
 
 /* ============ tiny procedural audio ============ */
 let AC = null;
@@ -781,21 +952,17 @@ const kaijuFill=$('kaijuFill'), mechFill=$('mechFill'), fuelFill=$('fuelFill');
 const mechLabel=$('mechLabel'), mechBar=$('mechBar'), fuelLabel=$('fuelLabel'), fuelBar=$('fuelBar');
 const helpEl=$('help'), cockpitEl=$('cockpit');
 
-const HELP_FOOT = 'WASD — move &nbsp;·&nbsp; SPACE (hold) — jetpack &nbsp;·&nbsp; E — board mech';
-const HELP_MECH = 'WASD — stomp &nbsp;·&nbsp; J / CLICK — punch &nbsp;·&nbsp; SPACE — shockwave stomp &nbsp;·&nbsp; E — disembark';
+const HELP_FOOT = 'WASD — move &nbsp;·&nbsp; SPACE (hold) — jetpack &nbsp;·&nbsp; E — board jaeger';
+const HELP_MECH = 'WASD — move &nbsp;·&nbsp; J / CLICK — punch &nbsp;·&nbsp; SPACE — shockwave stomp &nbsp;·&nbsp; E — disembark';
 helpEl.innerHTML = HELP_FOOT;
 
-function hatchWorld(){
-  const v = new THREE.Vector3(0, 12.5, 2.6);
-  return mech.group.localToWorld(v);
-}
 function tryBoardOrExit(){
   if(G.mode==='foot'){
     const hw = hatchWorld();
-    if(player.group.position.distanceTo(hw) < 8){
+    if(pilot.root.position.distanceTo(hw) < 9){
       G.mode = 'mech';
-      player.group.visible = false;
-      modeEl.textContent = 'MECH ONLINE'; modeEl.style.color = '#7df9ff';
+      pilot.root.visible = false;
+      modeEl.textContent = 'JAEGER ONLINE'; modeEl.style.color = '#7df9ff';
       cockpitEl.style.display = 'block';
       mechLabel.style.display = 'block'; mechBar.style.display = 'block';
       fuelLabel.style.display = 'none'; fuelBar.style.display = 'none';
@@ -806,10 +973,10 @@ function tryBoardOrExit(){
   } else if(!G.mechDead){
     /* disembark */
     G.mode = 'foot';
-    const side = new THREE.Vector3(8, 0, 0).applyQuaternion(mech.group.quaternion);
-    player.group.position.copy(mech.group.position).add(side);
-    player.group.position.y = 0.9; player.vy = 0;
-    player.group.visible = true;
+    const side = new THREE.Vector3(8, 0, 0).applyQuaternion(jaeger.root.quaternion);
+    pilot.root.position.copy(jaeger.root.position).add(side);
+    pilot.root.position.y = 0; pilot.vy = 0; pilot.vel.set(0, 0, 0);
+    pilot.root.visible = true;
     modeEl.textContent = 'ON FOOT'; modeEl.style.color = '#7df9ff';
     cockpitEl.style.display = 'none';
     mechLabel.style.display = 'none'; mechBar.style.display = 'none';
@@ -818,12 +985,12 @@ function tryBoardOrExit(){
   }
 }
 function tryPunch(){
-  if(G.mode !== 'mech' || mech.punchT > 0 || G.mechDead) return;
-  mech.punchT = 0.55;
+  if(G.mode !== 'mech' || jaeger.punchT > 0 || G.mechDead) return;
+  jaeger.punchT = 0.5;
   setTimeout(()=>{ /* connect at swing apex */
     if(G.mechDead) return;
-    const fwd = new THREE.Vector3(0,0,1).applyQuaternion(mech.group.quaternion);
-    const kp = kaiju.group.position, mp = mech.group.position;
+    const fwd = new THREE.Vector3(0,0,1).applyQuaternion(jaeger.root.quaternion);
+    const kp = kaiju.group.position, mp = jaeger.root.position;
     const dx = kp.x-mp.x, dz = kp.z-mp.z;
     const dist = Math.hypot(dx, dz);
     const ang = Math.acos(THREE.MathUtils.clamp((dx*fwd.x+dz*fwd.z)/Math.max(1,dist), -1, 1));
@@ -870,17 +1037,17 @@ const camLook = new THREE.Vector3();
 function tickCamera(dt){
   let want, look;
   if(G.mode === 'foot'){
-    const p = player.group.position;
-    const yaw = player.yaw;
+    const p = pilot.root.position;
+    const yaw = pilot.yaw;
     want = new THREE.Vector3(p.x - Math.sin(yaw)*6.5, p.y + 3.4, p.z - Math.cos(yaw)*6.5);
     look = new THREE.Vector3(p.x, p.y + 1.8, p.z);
-    /* tilt up as you near the mech so the 17m tower actually enters frame */
-    const mdx = mech.group.position.x - p.x, mdz = mech.group.position.z - p.z;
+    /* tilt up as you near the jaeger so the 17m tower actually enters frame */
+    const mdx = jaeger.root.position.x - p.x, mdz = jaeger.root.position.z - p.z;
     const md = Math.hypot(mdx, mdz);
     if (md < 45) look.y += Math.min(1, (45 - md) / 25) * 7;
   } else {
-    const mp = mech.group.position;
-    const yaw = mech.yaw;
+    const mp = jaeger.root.position;
+    const yaw = jaeger.yaw;
     want = new THREE.Vector3(mp.x - Math.sin(yaw)*30, mp.y + 15, mp.z - Math.cos(yaw)*30);
     look = new THREE.Vector3(mp.x, mp.y + 10, mp.z);
   }
@@ -895,103 +1062,30 @@ function tickCamera(dt){
   camera.lookAt(camLook);
 }
 
-/* ============ foot player tick ============ */
-function tickFoot(dt){
-  const p = player;
-  const ax = (keys.KeyD||keys.ArrowRight?1:0) - (keys.KeyA||keys.ArrowLeft?1:0);
-  const az = (keys.KeyS||keys.ArrowDown?1:0) - (keys.KeyW||keys.ArrowUp?1:0);
-  const speed = 7;
-  if(ax || az){
-    const len = Math.hypot(ax, az);
-    p.vel.x = ax/len*speed; p.vel.z = az/len*speed;
-    p.yaw = Math.atan2(p.vel.x, p.vel.z);
-    p.walkT += dt*9;
-  } else { p.vel.x *= 0.85; p.vel.z *= 0.85; }
-  p.group.position.x += p.vel.x*dt;
-  p.group.position.z += p.vel.z*dt;
-  p.group.position.x = THREE.MathUtils.clamp(p.group.position.x, -160, 160);
-  p.group.position.z = THREE.MathUtils.clamp(p.group.position.z, -160, 160);
-  /* jetpack */
-  const thrust = !!(keys.Space && p.fuel > 0);
-  p.flame.visible = thrust;
-  if(thrust){
-    p.vy += 34*dt; p.fuel = Math.max(0, p.fuel - 42*dt); p.grounded = false;
-    p.flame.scale.set(1, 0.8+Math.random()*0.7, 1);
-    if(Math.random()<0.6) spawnSparks(p.group.position.x, p.group.position.y+0.3,
-      p.group.position.z, 2, 7, 0x66d9ff);
-  } else {
-    p.vy -= 24*dt;
-  }
-  p.group.position.y += p.vy*dt;
-  if(p.group.position.y <= 0.9){
-    p.group.position.y = 0.9; p.vy = 0; p.grounded = true;
-    p.fuel = Math.min(100, p.fuel + 34*dt);
-  }
-  p.group.rotation.y = p.yaw;
-  const sw = (ax||az) && p.grounded ? Math.sin(p.walkT)*0.5 : 0;
-  p.legL.rotation.x = sw; p.legR.rotation.x = -sw;
-  fuelFill.style.width = p.fuel + '%';
+/* ============ pilot tick: snappy third-person biped + jetpack ============ */
+function tickPilot(dt){
+  tickBiped(pilot, dt, { topSpeed: 7.5, accelRate: 14, turnRate: 11, jetpack: true, giant: false, strideFreq: 2.1 });
+  poseBiped(pilot, dt);
+  fuelFill.style.width = pilot.fuel + '%';
   /* hatch prompt */
   const hw = hatchWorld();
-  if(p.group.position.distanceTo(hw) < 8){
+  if(pilot.root.position.distanceTo(hw) < 9){
     promptEl.style.display = 'block';
-    promptEl.textContent = 'E — BOARD MECH';
-    mech.hatchMat.emissiveIntensity = 2.2 + Math.sin(G.time*7)*1.2;
+    promptEl.textContent = 'E — BOARD JAEGER';
+    hatchMat.emissiveIntensity = 2.2 + Math.sin(G.time * 7) * 1.2;
   } else {
     promptEl.style.display = 'none';
-    mech.hatchMat.emissiveIntensity = 2.2;
+    hatchMat.emissiveIntensity = 2.2;
   }
 }
 
-/* ============ mech tick ============ */
-function tickMech(dt){
+/* ============ jaeger tick: same controller, 10x the weight ============ */
+function tickJaeger(dt){
   if(G.mechDead) return;
-  const ax = (keys.KeyD||keys.ArrowRight?1:0) - (keys.KeyA||keys.ArrowLeft?1:0);
-  const az = (keys.KeyS||keys.ArrowDown?1:0) - (keys.KeyW||keys.ArrowUp?1:0);
-  const m = mech;
-  const ACCEL = 16, MAXV = 11;
-  if(ax || az){
-    const len = Math.hypot(ax, az);
-    m.vel.x += ax/len*ACCEL*dt; m.vel.z += az/len*ACCEL*dt;
-  } else {
-    m.vel.multiplyScalar(Math.pow(0.12, dt));
-  }
-  if(m.vel.length() > MAXV) m.vel.setLength(MAXV);
-  m.group.position.x += m.vel.x*dt;
-  m.group.position.z += m.vel.z*dt;
-  m.group.position.x = THREE.MathUtils.clamp(m.group.position.x, -150, 150);
-  m.group.position.z = THREE.MathUtils.clamp(m.group.position.z, -150, 150);
-  const spd = m.vel.length();
-  if(spd > 0.8){
-    const targetYaw = Math.atan2(m.vel.x, m.vel.z);
-    let dy = targetYaw - m.yaw;
-    while(dy > Math.PI) dy -= Math.PI*2;
-    while(dy < -Math.PI) dy += Math.PI*2;
-    m.yaw += dy * Math.min(1, dt*2.2);   /* turn lag */
-  }
-  m.group.rotation.y = m.yaw;
-  /* stomp anim + footsteps */
-  m.stepPhase += dt * (1.2 + spd*0.55);
-  const sw = Math.sin(m.stepPhase);
-  m.legL.hip.rotation.x = sw*0.55; m.legR.hip.rotation.x = -sw*0.55;
-  m.legL.knee.rotation.x = Math.max(0, -sw)*0.7; m.legR.knee.rotation.x = Math.max(0, sw)*0.7;
-  m.armL.sh.rotation.x = -sw*0.3; m.armR.sh.rotation.x = sw*0.3;
-  m.torso.position.y = 11.6 + Math.abs(Math.cos(m.stepPhase))*0.35;
-  /* punch anim */
-  if(m.punchT > 0){
-    m.punchT -= dt;
-    const k = 1 - m.punchT/0.55;
-    const swing = Math.sin(k*Math.PI);
-    m.armR.sh.rotation.x = -swing*1.9;
-    m.armR.el.rotation.x = -swing*0.9;
-    m.torso.rotation.y = swing*0.28;
-  } else {
-    m.armR.sh.rotation.x *= 0.8; m.torso.rotation.y *= 0.8;
-  }
-  /* stomp shockwave */
-  if(keys.Space && m.stompT <= 0){
-    m.stompT = 1.7;
-    const mp = m.group.position;
+  /* shockwave stomp */
+  if(keys.Space && jaeger.stompT <= 0){
+    jaeger.stompT = 1.7;
+    const mp = jaeger.root.position;
     G.shake = Math.min(2.0, G.shake + 1.1);
     thud(42, 0.9, 0.5);
     for(let i=0;i<10;i++){
@@ -999,7 +1093,7 @@ function tickMech(dt){
       spawnDust(mp.x+Math.cos(a)*7, 1.5, mp.z+Math.sin(a)*7, 9, 1.3);
     }
     spawnSparks(mp.x, 2, mp.z, 30, 20, 0xffcf7d);
-    const fwd = new THREE.Vector3(0,0,1).applyQuaternion(m.group.quaternion);
+    const fwd = new THREE.Vector3(0,0,1).applyQuaternion(jaeger.root.quaternion);
     for(let r=0;r<3;r++){
       const b = buildingNear(mp.x+(Math.random()-0.5)*22, mp.z+(Math.random()-0.5)*22, 4);
       if(b) crumble(b, fwd.x, fwd.z);
@@ -1007,24 +1101,11 @@ function tickMech(dt){
     const kp = kaiju.group.position;
     if(Math.hypot(kp.x-mp.x, kp.z-mp.z) < 20 && !G.kaijuDead) damageKaiju(5, kp.x, 18, kp.z);
   }
-  m.stompT = Math.max(0, m.stompT - dt);
-  /* footstep events: shake + dust + building damage */
-  if(spd > 4){
-    const stride = 9;
-    m.stepAcc = (m.stepAcc||0) + spd*dt;
-    if(m.stepAcc > stride){
-      m.stepAcc = 0;
-      G.shake = Math.min(1.4, G.shake + 0.35);
-      thud(55, 0.35, 0.22);
-      const fp = m.group.position;
-      const side = (Math.random()<0.5?-1:1);
-      spawnDust(fp.x + side*2, 0.8, fp.z + 2, 7, 1.1);
-      const b = buildingNear(fp.x, fp.z, 6.5);
-      if(b) crumble(b, m.vel.x/spd, m.vel.z/spd);
-    }
-  }
+  jaeger.stompT = Math.max(0, jaeger.stompT - dt);
+  tickBiped(jaeger, dt, { topSpeed: 11, accelRate: 4.5, turnRate: 3.6, jetpack: false, giant: true, strideFreq: 0.62 });
+  if(jaeger.punchT > 0) jaeger.punchT -= dt;
+  poseBiped(jaeger, dt);
 }
-
 /* ============ kaiju AI ============ */
 function tickKaiju(dt){
   const k = kaiju;
@@ -1157,6 +1238,43 @@ function tickRain(dt, cx, cz){
   rainGeo.attributes.position.needsUpdate = true;
 }
 
+/* ============ VRM import slots (pilot + jaeger) ============ */
+async function handleImport(char, file, statusEl, clearEl){
+  statusEl.textContent = 'loading…';
+  try{
+    const res = await loadVRMFile(file);
+    attachAvatarToChar(char, res);
+    if(res.autorig){
+      char.floater = res.autorig.bodyType === 'floater';
+      statusEl.textContent = file.name + ' — ' + res.autorig.notice;
+      if(res.autorig.warnings.length) statusEl.textContent += ' ⚠ ' + res.autorig.warnings[0];
+    } else {
+      statusEl.textContent = file.name + ' — VRM attached' + (res.vrm0 ? ' (v0.x)' : '');
+    }
+    clearEl.style.display = 'block';
+    updateHatch();
+  }catch(err){
+    statusEl.textContent = 'import failed: ' + err.message;
+  }
+}
+$('filePilot').addEventListener('change', e=>{
+  const f = e.target.files[0]; if(f) handleImport(pilot, f, $('statusPilot'), $('clearPilot'));
+});
+$('fileJaeger').addEventListener('change', e=>{
+  const f = e.target.files[0]; if(f) handleImport(jaeger, f, $('statusJaeger'), $('clearJaeger'));
+});
+$('clearPilot').addEventListener('click', e=>{
+  e.stopPropagation(); detachAvatarFromChar(pilot);
+  $('statusPilot').textContent = 'procedural biped'; $('clearPilot').style.display = 'none';
+});
+$('clearJaeger').addEventListener('click', e=>{
+  e.stopPropagation(); detachAvatarFromChar(jaeger);
+  $('statusJaeger').textContent = 'procedural biped ×10'; $('clearJaeger').style.display = 'none';
+  updateHatch();
+});
+/* slot clicks must not trigger the tap-to-deploy on #start */
+document.querySelectorAll('#start .filebtn, #start .slotclear, #start .slot input').forEach(el => el.addEventListener('click', e => e.stopPropagation()));
+
 /* ============ main loop ============ */
 const clock = new THREE.Clock();
 let started = false;
@@ -1175,17 +1293,15 @@ function frame(){
   if(G.hitstop > 0){ G.hitstop -= rawDt; dt = 0; }
   if(started){
     G.time += dt;
-    if(G.mode==='foot') tickFoot(dt); else tickMech(dt);
+    if(G.mode==='foot'){ tickPilot(dt); poseBiped(jaeger, dt); /* parked jaeger breathes */ }
+    else tickJaeger(dt);
     tickKaiju(dt);
     tickDebris(dt); tickDust(dt); tickSparks(dt); tickChunks(dt);
     for(const b of buildings) b.cooldown = Math.max(0, b.cooldown - dt);
     const focus = G.mode==='mech' ? mech.group.position :
       (G.kaijuDead ? kaiju.group.position : player.group.position);
     tickRain(dt, focus.x, focus.z);
-    /* idle mech: subtle servo sway */
-    if(G.mode==='foot'){
-      mech.torso.rotation.y = Math.sin(G.time*0.5)*0.03;
-    }
+    updateHatch();
     tickCamera(dt);
   }
   gradePass.uniforms.uTime.value = G.time;
@@ -1194,6 +1310,9 @@ function frame(){
 frame();
 window.__scene = scene; window.__G = G; window.__kaiju = kaiju; window.__mech = mech;
 window.__player = player; window.__buildings = buildings;
+window.__pilot = pilot; window.__jaeger = jaeger; window.__keys = keys;
+window.__loadVRMFile = loadVRMFile; window.__attachAvatar = attachAvatarToChar;
+window.__detachAvatar = detachAvatarFromChar;
 
 </script>
 </body>
