@@ -118,8 +118,8 @@ import { ShaderPass } from 'three/addons/postprocessing/ShaderPass.js';
 import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
 import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
-import { buildProceduralRig, BONE_NAMES, VRM_BONE_MAP } from './js/rig.js?v=7';
-import { loadVRMFile, attachAvatarToChar, detachAvatarFromChar } from './js/vrm.js?v=7';
+import { buildProceduralRig, BONE_NAMES, VRM_BONE_MAP } from './js/rig.js?v=8';
+import { loadVRMFile, attachAvatarToChar, detachAvatarFromChar } from './js/vrm.js?v=8';
 
 
 window.__bootErrors = [];
@@ -531,8 +531,9 @@ function makeBiped({ scale = 1, bulky = false, suit = 0x2a3340, accent = 0x35e0f
     fuel: 100, grounded: true, airY: 0,
     stridePhase: 0, prevStepSign: 1, runBlend: 0, topSpeed: 7.5,
     headH: 1.7, camDist: 6.5, camShoulder: 0.9,
-    punchT: 0, punchSide: 'R', punchAnimSide: 'R',
-    charging: false, chargeT: 0, chargePower: 1,
+    punchT: 0, punchDur: 0.16, punchHitDone: false, punchDmg: 3,
+    punchSide: 'R', punchAnimSide: 'R',
+    charging: false, chargeT: 0,
     stompT: 0, state: 'idle', _animT: 0,
   };
 }
@@ -710,8 +711,14 @@ function poseBiped(c, dt){
   else dict = poseGait(moveAmt, c.runBlend, c.stridePhase, c._animT);
   if(c.charging && !c.floater)
     dict = blendDicts(dict, poseCharge(c.punchSide, c.chargeT, c._animT), Math.min(1, 0.45 + c.chargeT*0.8));
-  else if(c.punchT > 0 && !c.floater)
-    dict = blendDicts(dict, posePunch(1 - c.punchT / 0.5, c.punchAnimSide || c.punchSide), punchBlend(c.punchT));
+  else if(c.punchT > 0 && !c.floater){
+    const heavy = c.punchDmg > 6;
+    const k = 1 - c.punchT / c.punchDur;
+    const pp = heavy ? posePunch(k, c.punchAnimSide || c.punchSide)
+                     : poseJab(k, c.punchAnimSide || c.punchSide);
+    const bl = heavy ? punchBlend(c.punchT) : jabBlend(c.punchT, c.punchDur);
+    dict = blendDicts(dict, pp, bl);
+  }
   applyPose(c, dict);
   if(c.vrm && c.vrm.vrm && c.vrm.vrm.update) c.vrm.vrm.update(dt);
 }
@@ -1103,57 +1110,99 @@ function tryBoardOrExit(){
    punchSide = arm of the NEXT punch; punchAnimSide = arm of the live punch.
    v4.1: punch fires on PRESS (not release) so every click lands; clicks
    during the strike buffer one queued punch; holding past 0.35s charges. */
-let punchBtnDown = false, punchPressT = 0, punchQueued = false;
-function throwPunch(power){
+let punchBtnDown = false, punchPressT = 0;
+/* ---- anime flurry punch ----
+   Taps = lightning jabs (0.16s, retrigger instantly, alternate arms).
+   Hold = charge the next arm, release = heavy haymaker (0.5s).
+   punchDur = live punch length; punchHitDone = connected already. */
+const JAB_DUR = 0.16, HEAVY_DUR = 0.5;
+function poseJab(k, side){ /* k: 0→1 — snappy jab, minimal windup */
+  let arm, fore, twist;
+  if(k < 0.4){ const u = k/0.4;
+    arm = 0.5 + u*1.6; fore = 0.35 + u*0.9; twist = -u*0.28; }
+  else { const u = (k-0.4)/0.6;
+    arm = 2.1 - u*1.6; fore = 1.25 - u*0.9; twist = -0.28 + u*0.28; }
+  const m = side === 'L' ? -1 : 1;
+  const punchArm = side === 'R'
+    ? { upperArmR: [0, 0, arm], lowerArmR: [0, 0, fore],
+        upperArmL: [0, 0, -0.4], lowerArmL: [0, 0, -1.1] }
+    : { upperArmL: [0, 0, arm], lowerArmL: [0, 0, fore],
+        upperArmR: [0, 0, -0.4], lowerArmR: [0, 0, -1.1] };
+  const legs = side === 'R'
+    ? { upperLegR: [0, 0, 0.35], lowerLegR: [0, 0, -0.5],
+        upperLegL: [0, 0, -0.25], lowerLegL: [0, 0, -0.18] }
+    : { upperLegL: [0, 0, 0.35], lowerLegL: [0, 0, -0.5],
+        upperLegR: [0, 0, -0.25], lowerLegR: [0, 0, -0.18] };
+  return {
+    hips: [0, twist*0.7*m, 0], spine: [0, twist*0.35*m, -0.16],
+    chest: [0, twist*m, -0.10], head: [0, twist*0.4*m, 0.08],
+    ...punchArm, ...legs,
+  };
+}
+function jabBlend(pt, dur){ /* fast in, snappy out */
+  const elapsed = dur - pt;
+  const s = Math.min(Math.min(1, elapsed/0.03), Math.min(1, pt/0.08));
+  return s*s*(3-2*s);
+}
+function punchConnect(dmg){
+  if(G.mechDead) return;
+  const heavy = dmg > 6;
+  const fwd = new THREE.Vector3(0,0,1).applyQuaternion(jaeger.root.quaternion);
+  const kp = kaiju.group.position, mp = jaeger.root.position;
+  const dx = kp.x-mp.x, dz = kp.z-mp.z;
+  const dist = Math.hypot(dx, dz);
+  const ang = Math.acos(THREE.MathUtils.clamp((dx*fwd.x+dz*fwd.z)/Math.max(1,dist), -1, 1));
+  if(dist < 26 && ang < 0.9 && !G.kaijuDead){
+    damageKaiju(Math.round(dmg), kp.x, 20, kp.z, heavy);
+    if(heavy){ /* haymaker: bigger shockwave + crumble */
+      G.shake = Math.min(1.6, G.shake + 0.5);
+      const b2 = buildingNear(mp.x + fwd.x*14, mp.z + fwd.z*14, 10);
+      if(b2) crumble(b2, fwd.x, fwd.z);
+    }
+  }
+  /* shockwave crumbles nearby facades */
+  const b = buildingNear(mp.x + fwd.x*10, mp.z + fwd.z*10, 8);
+  if(b) crumble(b, fwd.x, fwd.z);
+}
+function throwPunch(dmg){
   const j = jaeger;
+  const heavy = dmg > 6;
   j.charging = false; j.chargeT = 0;
   j.punchAnimSide = j.punchSide;
   j.punchSide = j.punchSide === 'R' ? 'L' : 'R';
-  j.punchT = 0.5;
-  j.chargePower = power;
-  const pw = power;
-  setTimeout(()=>{ /* connect at swing apex */
-    if(G.mechDead) return;
-    const fwd = new THREE.Vector3(0,0,1).applyQuaternion(jaeger.root.quaternion);
-    const kp = kaiju.group.position, mp = jaeger.root.position;
-    const dx = kp.x-mp.x, dz = kp.z-mp.z;
-    const dist = Math.hypot(dx, dz);
-    const ang = Math.acos(THREE.MathUtils.clamp((dx*fwd.x+dz*fwd.z)/Math.max(1,dist), -1, 1));
-    if(dist < 26 && ang < 0.9 && !G.kaijuDead){
-      damageKaiju(Math.round(9*pw), kp.x, 20, kp.z);
-      if(pw > 1.6){ /* charged: bigger shockwave + crumble */
-        G.shake = Math.min(1.6, G.shake + 0.5);
-        const b2 = buildingNear(mp.x + fwd.x*14, mp.z + fwd.z*14, 10);
-        if(b2) crumble(b2, fwd.x, fwd.z);
-      }
-    }
-    /* shockwave crumbles nearby facades */
-    const b = buildingNear(mp.x + fwd.x*10, mp.z + fwd.z*10, 8);
-    if(b) crumble(b, fwd.x, fwd.z);
-  }, 150);
+  j.punchDur = heavy ? HEAVY_DUR : JAB_DUR;
+  j.punchT = j.punchDur;
+  j.punchHitDone = false;
+  j.punchDmg = dmg;
 }
 function punchDown(){
   if(!started || G.mode !== 'mech' || G.mechDead) return;
   const j = jaeger;
   punchBtnDown = true; punchPressT = 0;
   if(j.charging) return;
-  if(j.punchT > 0.3){ punchQueued = true; return; }  /* buffer during strike */
-  punchQueued = false;
-  throwPunch(1);  /* instant on press */
+  throwPunch(3);  /* every press retriggers a jab instantly */
 }
 function punchUp(){
   punchBtnDown = false;
   const j = jaeger;
-  if(j.charging) throwPunch(1 + 2*Math.min(1, j.chargeT/1.1));
+  if(j.charging) throwPunch(5 + 10*Math.min(1, j.chargeT/1.1));  /* 5→15 haymaker */
 }
-function damageKaiju(dmg, hx, hy, hz){
+function damageKaiju(dmg, hx, hy, hz, heavy){
   kaiju.hp -= dmg;
   kaiju.flash = 1;
-  G.hitstop = 0.085;
-  G.shake = Math.min(1.2, G.shake + 0.55);
-  spawnSparks(hx, hy, hz, 46, 22, 0xffcf7d);
-  spawnDust(hx, hy-6, hz, 10, 1.2);
-  thud(60, 0.7, 0.3);
+  if(heavy){ /* haymaker: full stop + shake */
+    G.hitstop = 0.085;
+    G.shake = Math.min(1.2, G.shake + 0.55);
+    spawnSparks(hx, hy, hz, 46, 22, 0xffcf7d);
+    spawnDust(hx, hy-6, hz, 10, 1.2);
+    thud(60, 0.7, 0.3);
+  } else { /* jab: light touch so the flurry never stutters */
+    G.hitstop = Math.max(G.hitstop, 0.028);
+    G.shake = Math.min(1.2, G.shake + 0.22);
+    spawnSparks(hx, hy, hz, 18, 16, 0xffcf7d);
+    spawnDust(hx, hy-6, hz, 4, 0.8);
+    thud(70, 0.35, 0.18);
+  }
   kaijuFill.style.width = Math.max(0, kaiju.hp) + '%';
   if(kaiju.hp <= 0 && !G.kaijuDead){
     G.kaijuDead = true; kaiju.state = 'dying'; kaiju.toppleT = 0;
@@ -1282,15 +1331,17 @@ function tickJaeger(dt){
   if(G.mechDead) return;
   tickBiped(jaeger, dt, { topSpeed: 11, sprintTop: 15.5, accelRate: 4.5, turnRate: 4.2,
     jumpable: true, giant: true });
-  if(jaeger.punchT > 0) jaeger.punchT -= dt;
-  if(punchBtnDown) punchPressT += dt;
-  /* buffered click: interrupt the recovery so every press lands a punch */
-  if(punchQueued && !jaeger.charging && jaeger.punchT <= 0.3){
-    punchQueued = false;
-    throwPunch(1);
+  if(jaeger.punchT > 0){
+    jaeger.punchT -= dt;
+    /* connect at the strike (k≈0.4) — in-tick, so flurries never stack timeouts */
+    if(!jaeger.punchHitDone && (1 - jaeger.punchT/jaeger.punchDur) > 0.38){
+      jaeger.punchHitDone = true;
+      punchConnect(jaeger.punchDmg);
+    }
   }
+  if(punchBtnDown) punchPressT += dt;
   /* still holding after the press window -> charge the next arm */
-  if(punchBtnDown && !jaeger.charging && jaeger.punchT <= 0 && punchPressT > 0.35){
+  if(punchBtnDown && !jaeger.charging && jaeger.punchT <= 0 && punchPressT > 0.3){
     jaeger.charging = true; jaeger.chargeT = 0;
   }
   if(jaeger.charging){
