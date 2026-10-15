@@ -118,8 +118,8 @@ import { ShaderPass } from 'three/addons/postprocessing/ShaderPass.js';
 import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
 import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
-import { buildProceduralRig, BONE_NAMES, VRM_BONE_MAP } from './js/rig.js?v=5';
-import { loadVRMFile, attachAvatarToChar, detachAvatarFromChar } from './js/vrm.js?v=5';
+import { buildProceduralRig, BONE_NAMES, VRM_BONE_MAP } from './js/rig.js?v=6';
+import { loadVRMFile, attachAvatarToChar, detachAvatarFromChar } from './js/vrm.js?v=6';
 
 
 window.__bootErrors = [];
@@ -531,7 +531,9 @@ function makeBiped({ scale = 1, bulky = false, suit = 0x2a3340, accent = 0x35e0f
     fuel: 100, grounded: true, airY: 0,
     stridePhase: 0, prevStepSign: 1, runBlend: 0, topSpeed: 7.5,
     headH: 1.7, camDist: 6.5, camShoulder: 0.9,
-    punchT: 0, stompT: 0, state: 'idle', _animT: 0,
+    punchT: 0, punchSide: 'R', punchAnimSide: 'R',
+    charging: false, chargeT: 0, chargePower: 1,
+    stompT: 0, state: 'idle', _animT: 0,
   };
 }
 
@@ -580,7 +582,8 @@ function punchBlend(pt){ /* pt: 0.5→0 — fast in, eased out */
   const s = Math.min(Math.min(1, elapsed/0.08), Math.min(1, pt/0.22));
   return s*s*(3-2*s);
 }
-function posePunch(k){ /* k: 0→1 — whole body commits, not just the arm */
+function posePunch(k, side){ /* k: 0→1 — whole body commits, not just the arm.
+  side 'L' mirrors the punch so the combo alternates arms. */
   let arm, fore, twist, crouch, leanF;
   if(k < 0.35){ const u = k/0.35;
     arm = 0.9 + u*1.1; fore = 0.5 + u*1.0; twist = -u*0.35; crouch = u*0.28; leanF = u*0.10; }
@@ -588,15 +591,48 @@ function posePunch(k){ /* k: 0→1 — whole body commits, not just the arm */
     arm = 2.0 - u*1.9; fore = 1.5 - u*1.35; twist = -0.35 + u*0.65; crouch = 0.28 - u*0.08; leanF = 0.10 + u*0.12; }
   else { const u = (k-0.62)/0.38;
     arm = 0.1 + u*0.8; fore = 0.15 + u*0.35; twist = 0.30 - u*0.30; crouch = 0.20 - u*0.20; leanF = 0.22 - u*0.22; }
+  const m = side === 'L' ? -1 : 1;
+  const punchArm = side === 'R'
+    ? { upperArmR: [0, 0, arm], lowerArmR: [0, 0, fore],
+        upperArmL: [0, 0, -0.5], lowerArmL: [0, 0, -1.2],
+        upperLegR: [0, 0, 0.44], lowerLegR: [0, 0, -0.60 - crouch],
+        upperLegL: [0, 0, -0.30], lowerLegL: [0, 0, -0.20] }
+    : { upperArmL: [0, 0, arm], lowerArmL: [0, 0, fore],
+        upperArmR: [0, 0, -0.5], lowerArmR: [0, 0, -1.2],
+        upperLegL: [0, 0, 0.44], lowerLegL: [0, 0, -0.60 - crouch],
+        upperLegR: [0, 0, -0.30], lowerLegR: [0, 0, -0.20] };
   return {
-    hips:  [0, twist*0.8, 0],
-    spine: [0, twist*0.4, -0.20 - leanF],
-    chest: [0, twist, -0.12 - leanF*0.6],
-    head:  [0, twist*0.5, 0.10],
-    upperArmR: [0, 0, arm], lowerArmR: [0, 0, fore],
-    upperArmL: [0, 0, -0.5], lowerArmL: [0, 0, -1.2],
-    upperLegR: [0, 0, 0.44], lowerLegR: [0, 0, -0.60 - crouch],
-    upperLegL: [0, 0, -0.30], lowerLegL: [0, 0, -0.20],
+    hips:  [0, twist*0.8*m, 0],
+    spine: [0, twist*0.4*m, -0.20 - leanF],
+    chest: [0, twist*m, -0.12 - leanF*0.6],
+    head:  [0, twist*0.5*m, 0.10],
+    ...punchArm,
+  };
+}
+function poseCharge(side, charge, t){
+  /* held windup: body coiled, incoming arm cocked, trembling with charge.
+     charge: seconds held (0→1.2). */
+  const cf = Math.min(1, charge / 1.1);
+  const shake = cf * 0.07;
+  const shx = Math.sin(t*47)*shake, shz = Math.cos(t*39)*shake;
+  const coil = 0.35 + cf*0.18;
+  const m = side === 'L' ? -1 : 1;
+  const arms = side === 'R'
+    ? { upperArmR: [0, 0, 0.55 + shx], lowerArmR: [0, 0, 1.75 + shz],
+        upperArmL: [0, 0, -0.5], lowerArmL: [0, 0, -1.2] }
+    : { upperArmL: [0, 0, 0.55 + shx], lowerArmL: [0, 0, 1.75 + shz],
+        upperArmR: [0, 0, -0.5], lowerArmR: [0, 0, -1.2] };
+  const legs = side === 'R'
+    ? { upperLegR: [0, 0, 0.52], lowerLegR: [0, 0, -0.95],
+        upperLegL: [0, 0, -0.38], lowerLegL: [0, 0, -0.45] }
+    : { upperLegL: [0, 0, 0.52], lowerLegL: [0, 0, -0.95],
+        upperLegR: [0, 0, -0.38], lowerLegR: [0, 0, -0.45] };
+  return {
+    hips:  [0, -coil*0.8*m, 0.07],
+    spine: [0, -coil*0.4*m, -0.30 - cf*0.14],
+    chest: [0, -coil*m, -0.18 - cf*0.08],
+    head:  [0, -coil*0.5*m, 0.14],
+    ...arms, ...legs,
   };
 }
 function poseJump(){
@@ -672,8 +708,10 @@ function poseBiped(c, dt){
   if(c.floater) dict = poseHover(c._animT);
   else if(!c.grounded) dict = c.vy > 1 ? poseJump() : poseFall();
   else dict = poseGait(moveAmt, c.runBlend, c.stridePhase, c._animT);
-  if(c.punchT > 0 && !c.floater)
-    dict = blendDicts(dict, posePunch(1 - c.punchT / 0.5), punchBlend(c.punchT));
+  if(c.charging && !c.floater)
+    dict = blendDicts(dict, poseCharge(c.punchSide, c.chargeT, c._animT), Math.min(1, 0.45 + c.chargeT*0.8));
+  else if(c.punchT > 0 && !c.floater)
+    dict = blendDicts(dict, posePunch(1 - c.punchT / 0.5, c.punchAnimSide || c.punchSide), punchBlend(c.punchT));
   applyPose(c, dict);
   if(c.vrm && c.vrm.vrm && c.vrm.vrm.update) c.vrm.vrm.update(dt);
 }
@@ -688,9 +726,11 @@ function tickBiped(c, dt, o){
   const sprinting = !!(keys.ShiftLeft || keys.ShiftRight);
   const topSpeed = (sprinting && o.sprintTop ? o.sprintTop : o.topSpeed);
   c.topSpeed = topSpeed;
-  const ix = (keys.KeyD || keys.ArrowRight ? 1 : 0) - (keys.KeyA || keys.ArrowLeft ? 1 : 0);
+  const ix = (keys.KeyA || keys.ArrowLeft ? 1 : 0) - (keys.KeyD || keys.ArrowRight ? 1 : 0);
   const iz = (keys.KeyW || keys.ArrowUp ? 1 : 0) - (keys.KeyS || keys.ArrowDown ? 1 : 0);
-  /* camera-relative wish direction (camYaw = mouse-look yaw) */
+  /* camera-relative wish direction (camYaw = mouse-look yaw).
+     flipped 2026-10-14: at camYaw=0 camera-right is world -X, so D must
+     yield -1 to move screen-right (was inverted). */
   const fx = Math.sin(camYaw), fz = Math.cos(camYaw);
   const rx = Math.cos(camYaw), rz = -Math.sin(camYaw);
   let wx = fx*iz + rx*ix, wz = fz*iz + rz*ix;
@@ -785,6 +825,16 @@ function chestWorld(c, out){
   else if(c.rig && c.rig.bones.chest) n = c.rig.bones.chest;
   if(n) return n.getWorldPosition(out);
   return c.root.localToWorld(out.set(0, 1.35, 0));
+}
+const _hv2 = new THREE.Vector3();
+function handWorld(c, side, out){
+  out = out || new THREE.Vector3();
+  const bn = side === 'L' ? 'handL' : 'handR';
+  let n = null;
+  if(c.vrm && c.vrm.vrm && c.vrm.vrm.humanoid) n = c.vrm.vrm.humanoid.getNormalizedBoneNode(VRM_BONE_MAP[bn]);
+  else if(c.rig && c.rig.bones[bn]) n = c.rig.bones[bn];
+  if(n) return n.getWorldPosition(out);
+  return out.copy(c.root.position);
 }
 function updateHatch(){
   const w = chestWorld(jaeger, _hv);
@@ -915,11 +965,12 @@ addEventListener('keydown', e=>{
   if(e.repeat) return;
   keys[e.code] = true;
   if(e.code === 'KeyE') tryBoardOrExit();
-  if(e.code === 'KeyJ') tryPunch();
+  if(e.code === 'KeyJ') punchStart();
   if(e.code === 'Space' && G.mode === 'mech' && started) jaegerJump();
 });
-addEventListener('keyup', e=>{ keys[e.code] = false; });
-addEventListener('mousedown', e=>{ if(started && e.target.tagName === 'CANVAS') tryPunch(); });
+addEventListener('keyup', e=>{ keys[e.code] = false; if(e.code === 'KeyJ') punchRelease(); });
+addEventListener('mousedown', e=>{ if(started && e.target.tagName === 'CANVAS') punchStart(); });
+addEventListener('mouseup', e=>{ punchRelease(); });
 addEventListener('resize', ()=>{
   camera.aspect = innerWidth/innerHeight; camera.updateProjectionMatrix();
   renderer.setSize(innerWidth, innerHeight);
@@ -1017,7 +1068,7 @@ const mechLabel=$('mechLabel'), mechBar=$('mechBar'), fuelLabel=$('fuelLabel'), 
 const helpEl=$('help'), cockpitEl=$('cockpit');
 
 const HELP_FOOT = 'WASD — move &nbsp;·&nbsp; MOUSE — look (click to capture) &nbsp;·&nbsp; SHIFT — sprint &nbsp;·&nbsp; SPACE (hold) — jetpack &nbsp;·&nbsp; E — board jaeger';
-const HELP_MECH = 'WASD — move &nbsp;·&nbsp; MOUSE — look &nbsp;·&nbsp; SHIFT — sprint &nbsp;·&nbsp; LMB / J — punch &nbsp;·&nbsp; SPACE — jump (landing = shockwave) &nbsp;·&nbsp; E — disembark';
+const HELP_MECH = 'WASD — move &nbsp;·&nbsp; MOUSE — look &nbsp;·&nbsp; SHIFT — sprint &nbsp;·&nbsp; LMB / J — punch (alternates arms, HOLD to charge) &nbsp;·&nbsp; SPACE — jump (landing = shockwave) &nbsp;·&nbsp; E — disembark';
 helpEl.innerHTML = HELP_FOOT;
 
 function tryBoardOrExit(){
@@ -1048,9 +1099,25 @@ function tryBoardOrExit(){
     helpEl.innerHTML = HELP_FOOT;
   }
 }
-function tryPunch(){
-  if(G.mode !== 'mech' || jaeger.punchT > 0 || G.mechDead) return;
-  jaeger.punchT = 0.5;
+/* punch combo: taps alternate arms; holding charges the incoming arm.
+   punchSide = arm of the NEXT punch; punchAnimSide = arm of the live punch. */
+function punchStart(){
+  if(!started || G.mode !== 'mech' || G.mechDead) return;
+  const j = jaeger;
+  if(j.punchT > 0 || j.charging) return;
+  j.charging = true; j.chargeT = 0;
+}
+function punchRelease(){
+  const j = jaeger;
+  if(!j.charging) return;
+  j.charging = false;
+  if(G.mode !== 'mech' || G.mechDead){ j.chargeT = 0; return; }
+  const power = 1 + 2*Math.min(1, j.chargeT/1.1);   /* hold 1.1s = 3x hit */
+  j.chargePower = power;
+  j.punchAnimSide = j.punchSide;
+  j.punchSide = j.punchSide === 'R' ? 'L' : 'R';
+  j.punchT = 0.5;
+  j.chargeT = 0;
   setTimeout(()=>{ /* connect at swing apex */
     if(G.mechDead) return;
     const fwd = new THREE.Vector3(0,0,1).applyQuaternion(jaeger.root.quaternion);
@@ -1059,7 +1126,12 @@ function tryPunch(){
     const dist = Math.hypot(dx, dz);
     const ang = Math.acos(THREE.MathUtils.clamp((dx*fwd.x+dz*fwd.z)/Math.max(1,dist), -1, 1));
     if(dist < 26 && ang < 0.9 && !G.kaijuDead){
-      damageKaiju(9, kp.x, 20, kp.z);
+      damageKaiju(Math.round(9*power), kp.x, 20, kp.z);
+      if(power > 1.6){ /* charged: bigger shockwave + crumble */
+        G.shake = Math.min(1.6, G.shake + 0.5);
+        const b = buildingNear(mp.x + fwd.x*14, mp.z + fwd.z*14, 10);
+        if(b) crumble(b, fwd.x, fwd.z);
+      }
     }
     /* shockwave crumbles nearby facades */
     const b = buildingNear(mp.x + fwd.x*10, mp.z + fwd.z*10, 8);
@@ -1203,6 +1275,12 @@ function tickJaeger(dt){
   tickBiped(jaeger, dt, { topSpeed: 11, sprintTop: 15.5, accelRate: 4.5, turnRate: 4.2,
     jumpable: true, giant: true });
   if(jaeger.punchT > 0) jaeger.punchT -= dt;
+  if(jaeger.charging){
+    jaeger.chargeT = Math.min(1.2, jaeger.chargeT + dt);
+    /* charge FX: sparks gather at the incoming fist, denser as it builds */
+    const hw = handWorld(jaeger, jaeger.punchSide, _hv2);
+    spawnSparks(hw.x, hw.y, hw.z, 1 + Math.floor(jaeger.chargeT*4), 5 + jaeger.chargeT*9, 0x7df9ff);
+  }
   poseBiped(jaeger, dt);
 }
 /* ============ kaiju AI ============ */
