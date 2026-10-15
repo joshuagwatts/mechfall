@@ -64,7 +64,7 @@ export function buildProceduralRig(theme, variant) {
 
   for (const s of [-1, 1]) {
     const L = s < 0 ? 'L' : 'R';
-    const hip = at('upperLeg' + L, hips, s * 0.11, -0.04, 0);
+    const hip = at('upperLeg' + L, hips, 0, -0.04, s * 0.11);
     const thigh = limb(bulky ? 0.085 : 0.07, 0.40, suitMat);
     hip.add(thigh);
     const knee = at('lowerLeg' + L, thigh, 0, -0.42, 0);
@@ -118,7 +118,7 @@ export function buildProceduralRig(theme, variant) {
   // ---- arms ----
   for (const s of [-1, 1]) {
     const L = s < 0 ? 'L' : 'R';
-    const shoulder = at('upperArm' + L, chest, s * (bulky ? 0.25 : 0.21), 0.18, 0);
+    const shoulder = at('upperArm' + L, chest, 0, 0.18, s * (bulky ? 0.25 : 0.21));
     if (!bulky) {
       const pad = new THREE.Mesh(new THREE.SphereGeometry(0.095, 14, 10), accentMat);
       pad.position.y = 0.02;
@@ -194,7 +194,7 @@ function buildWispRig(theme, suitMat, accentMat, darkMat) {
   // which put the "right" arm behind the body and broke hitbox sync)
   for (const s of [-1, 1]) {
     const L = s < 0 ? 'L' : 'R';
-    const shoulder = at('upperArm' + L, chest, s * 0.38, 0.10, 0);
+    const shoulder = at('upperArm' + L, chest, 0, 0.10, s * 0.38);
     const upper = new THREE.Mesh(new THREE.CapsuleGeometry(0.06, 0.20, 4, 10), suitMat);
     upper.position.y = -0.13;
     shoulder.add(upper);
