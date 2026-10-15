@@ -118,8 +118,8 @@ import { ShaderPass } from 'three/addons/postprocessing/ShaderPass.js';
 import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
 import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
-import { buildProceduralRig, BONE_NAMES, VRM_BONE_MAP } from './js/rig.js?v=6';
-import { loadVRMFile, attachAvatarToChar, detachAvatarFromChar } from './js/vrm.js?v=6';
+import { buildProceduralRig, BONE_NAMES, VRM_BONE_MAP } from './js/rig.js?v=7';
+import { loadVRMFile, attachAvatarToChar, detachAvatarFromChar } from './js/vrm.js?v=7';
 
 
 window.__bootErrors = [];
@@ -965,12 +965,12 @@ addEventListener('keydown', e=>{
   if(e.repeat) return;
   keys[e.code] = true;
   if(e.code === 'KeyE') tryBoardOrExit();
-  if(e.code === 'KeyJ') punchStart();
+  if(e.code === 'KeyJ') punchDown();
   if(e.code === 'Space' && G.mode === 'mech' && started) jaegerJump();
 });
-addEventListener('keyup', e=>{ keys[e.code] = false; if(e.code === 'KeyJ') punchRelease(); });
-addEventListener('mousedown', e=>{ if(started && e.target.tagName === 'CANVAS') punchStart(); });
-addEventListener('mouseup', e=>{ punchRelease(); });
+addEventListener('keyup', e=>{ keys[e.code] = false; if(e.code === 'KeyJ') punchUp(); });
+addEventListener('mousedown', e=>{ if(started && e.target.tagName === 'CANVAS') punchDown(); });
+addEventListener('mouseup', e=>{ punchUp(); });
 addEventListener('resize', ()=>{
   camera.aspect = innerWidth/innerHeight; camera.updateProjectionMatrix();
   renderer.setSize(innerWidth, innerHeight);
@@ -1100,24 +1100,18 @@ function tryBoardOrExit(){
   }
 }
 /* punch combo: taps alternate arms; holding charges the incoming arm.
-   punchSide = arm of the NEXT punch; punchAnimSide = arm of the live punch. */
-function punchStart(){
-  if(!started || G.mode !== 'mech' || G.mechDead) return;
+   punchSide = arm of the NEXT punch; punchAnimSide = arm of the live punch.
+   v4.1: punch fires on PRESS (not release) so every click lands; clicks
+   during the strike buffer one queued punch; holding past 0.35s charges. */
+let punchBtnDown = false, punchPressT = 0, punchQueued = false;
+function throwPunch(power){
   const j = jaeger;
-  if(j.punchT > 0 || j.charging) return;
-  j.charging = true; j.chargeT = 0;
-}
-function punchRelease(){
-  const j = jaeger;
-  if(!j.charging) return;
-  j.charging = false;
-  if(G.mode !== 'mech' || G.mechDead){ j.chargeT = 0; return; }
-  const power = 1 + 2*Math.min(1, j.chargeT/1.1);   /* hold 1.1s = 3x hit */
-  j.chargePower = power;
+  j.charging = false; j.chargeT = 0;
   j.punchAnimSide = j.punchSide;
   j.punchSide = j.punchSide === 'R' ? 'L' : 'R';
   j.punchT = 0.5;
-  j.chargeT = 0;
+  j.chargePower = power;
+  const pw = power;
   setTimeout(()=>{ /* connect at swing apex */
     if(G.mechDead) return;
     const fwd = new THREE.Vector3(0,0,1).applyQuaternion(jaeger.root.quaternion);
@@ -1126,17 +1120,31 @@ function punchRelease(){
     const dist = Math.hypot(dx, dz);
     const ang = Math.acos(THREE.MathUtils.clamp((dx*fwd.x+dz*fwd.z)/Math.max(1,dist), -1, 1));
     if(dist < 26 && ang < 0.9 && !G.kaijuDead){
-      damageKaiju(Math.round(9*power), kp.x, 20, kp.z);
-      if(power > 1.6){ /* charged: bigger shockwave + crumble */
+      damageKaiju(Math.round(9*pw), kp.x, 20, kp.z);
+      if(pw > 1.6){ /* charged: bigger shockwave + crumble */
         G.shake = Math.min(1.6, G.shake + 0.5);
-        const b = buildingNear(mp.x + fwd.x*14, mp.z + fwd.z*14, 10);
-        if(b) crumble(b, fwd.x, fwd.z);
+        const b2 = buildingNear(mp.x + fwd.x*14, mp.z + fwd.z*14, 10);
+        if(b2) crumble(b2, fwd.x, fwd.z);
       }
     }
     /* shockwave crumbles nearby facades */
     const b = buildingNear(mp.x + fwd.x*10, mp.z + fwd.z*10, 8);
     if(b) crumble(b, fwd.x, fwd.z);
   }, 150);
+}
+function punchDown(){
+  if(!started || G.mode !== 'mech' || G.mechDead) return;
+  const j = jaeger;
+  punchBtnDown = true; punchPressT = 0;
+  if(j.charging) return;
+  if(j.punchT > 0.3){ punchQueued = true; return; }  /* buffer during strike */
+  punchQueued = false;
+  throwPunch(1);  /* instant on press */
+}
+function punchUp(){
+  punchBtnDown = false;
+  const j = jaeger;
+  if(j.charging) throwPunch(1 + 2*Math.min(1, j.chargeT/1.1));
 }
 function damageKaiju(dmg, hx, hy, hz){
   kaiju.hp -= dmg;
@@ -1275,6 +1283,16 @@ function tickJaeger(dt){
   tickBiped(jaeger, dt, { topSpeed: 11, sprintTop: 15.5, accelRate: 4.5, turnRate: 4.2,
     jumpable: true, giant: true });
   if(jaeger.punchT > 0) jaeger.punchT -= dt;
+  if(punchBtnDown) punchPressT += dt;
+  /* buffered click: interrupt the recovery so every press lands a punch */
+  if(punchQueued && !jaeger.charging && jaeger.punchT <= 0.3){
+    punchQueued = false;
+    throwPunch(1);
+  }
+  /* still holding after the press window -> charge the next arm */
+  if(punchBtnDown && !jaeger.charging && jaeger.punchT <= 0 && punchPressT > 0.35){
+    jaeger.charging = true; jaeger.chargeT = 0;
+  }
   if(jaeger.charging){
     jaeger.chargeT = Math.min(1.2, jaeger.chargeT + dt);
     /* charge FX: sparks gather at the incoming fist, denser as it builds */
